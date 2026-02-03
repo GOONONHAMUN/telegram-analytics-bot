@@ -1,3 +1,27 @@
+import sys
+print("=" * 50)
+print("🚀 Начало выполнения app.py")
+print(f"Python версия: {sys.version}")
+print(f"Аргументы: {sys.argv}")
+print("=" * 50)
+
+# Проверяем импорты
+try:
+    from flask import Flask
+    print("✅ Flask импортирован")
+except ImportError as e:
+    print(f"❌ Ошибка импорта Flask: {e}")
+    sys.exit(1)
+
+try:
+    import telebot
+    print("✅ telebot импортирован")
+except ImportError as e:
+    print(f"❌ Ошибка импорта telebot: {e}")
+    sys.exit(1)
+
+# ... остальной код ...
+
 import os
 import telebot
 from flask import Flask, request, jsonify
@@ -679,4 +703,5 @@ if __name__ == '__main__':
     # Запуск Flask
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
