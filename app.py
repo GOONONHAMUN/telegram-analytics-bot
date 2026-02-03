@@ -671,7 +671,7 @@ if __name__ == '__main__':
     # Инициализация БД
     init_database()
     
-    logger.info(f"✅ Бот: @{Goononkhamun_bot}")
+    logger.info("✅ Бот: @{Goononkhamun_bot}")
     logger.info(f"🔗 Ссылка: {BOT_LINK}")
     logger.info("🌐 Веб-приложение запускается...")
     logger.info("📡 Режим: Вебхук (без polling)")
@@ -679,3 +679,4 @@ if __name__ == '__main__':
     # Запуск Flask
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
