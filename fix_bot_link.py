@@ -4,9 +4,9 @@ def fix_bot_links():
     """Автоматическое исправление ссылок на бота в app.py"""
     
     # Введите username вашего бота (без @)
-    bot_username = input("Введите username вашего бота (без @): ").strip()
+    bot_username = input("Goononkhamun_bot: ").strip()
     if not bot_username:
-        bot_username = "goonlord_analytics_bot"  # замените на ваш
+        bot_username = "@Goononkhamun_bot"  # замените на ваш
     
     # Читаем файл
     with open('app.py', 'r', encoding='utf-8') as f:
