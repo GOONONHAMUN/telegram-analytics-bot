@@ -7,6 +7,9 @@ from datetime import datetime
 import threading
 import time
 import logging
+import asyncio
+from channel_monitor import ChannelMonitor
+from config import Config
 
 # ========== НАСТРОЙКА ЛОГГИРОВАНИЯ ==========
 logging.basicConfig(
@@ -16,33 +19,58 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
-# Получаем токен из переменных окружения (безопасно)
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не установлен!")
-    logger.info("Установите переменную BOT_TOKEN на Render.com")
-    # Для локальной разработки можно временно указать здесь:
-    # BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"
-
-ADMIN_IDS = [int(id.strip()) for id in os.environ.get('ADMIN_IDS', '').split(',') if id.strip()]
-if not ADMIN_IDS:
-    ADMIN_IDS = [123456789]  # Ваш ID по умолчанию
+Config.validate()
+BOT_TOKEN = Config.BOT_TOKEN
+ADMIN_IDS = Config.ADMIN_IDS
 
 # Инициализация бота и Flask
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
+# Инициализация монитора каналов
+channel_monitor = None
+
+def init_channel_monitor():
+    """Инициализация монитора каналов"""
+    global channel_monitor
+    if Config.API_ID and Config.API_HASH:
+        try:
+            # Запускаем в отдельном потоке
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            channel_monitor = ChannelMonitor(
+                api_id=Config.API_ID,
+                api_hash=Config.API_HASH
+            )
+            
+            # Запускаем подключение асинхронно
+            def run_connect():
+                asyncio.run(channel_monitor.connect())
+            
+            thread = threading.Thread(target=run_connect, daemon=True)
+            thread.start()
+            
+            logger.info("✅ Монитор каналов инициализирован")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации монитора каналов: {e}")
+            return False
+    else:
+        logger.warning("⚠️ API_ID и API_HASH не установлены, реальная статистика недоступна")
+        return False
+
 # ========== БАЗА ДАННЫХ ==========
-# На Render.com используем временную папку
-DB_PATH = '/tmp/bot_database.db' if 'RENDER' in os.environ else 'bot_database.db'
+DB_PATH = Config.DB_PATH
 
 def init_database():
-    """Инициализация базы данных SQLite"""
+    """Инициализация базы данных с расширенными таблицами"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Таблица пользователей бота
+        # Существующие таблицы
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,24 +83,27 @@ def init_database():
             )
         ''')
         
-        # Таблица каналов
+        # Расширенная таблица каналов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_id TEXT UNIQUE NOT NULL,
+                channel_id INTEGER UNIQUE NOT NULL,
                 channel_name TEXT,
+                username TEXT,
+                participants_count INTEGER DEFAULT 0,
                 added_by INTEGER,
                 added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 is_active BOOLEAN DEFAULT 1,
+                last_updated TIMESTAMP,
                 FOREIGN KEY (added_by) REFERENCES users (user_id)
             )
         ''')
         
-        # Таблица статистики постов
+        # Расширенная таблица постов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_id TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
                 post_id INTEGER NOT NULL,
                 message_text TEXT,
                 views INTEGER DEFAULT 0,
@@ -84,7 +115,21 @@ def init_database():
             )
         ''')
         
-        # Таблица команд бота
+        # Таблица для хранения статистики по дням
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                date DATE NOT NULL,
+                posts_count INTEGER DEFAULT 0,
+                total_views INTEGER DEFAULT 0,
+                total_forwards INTEGER DEFAULT 0,
+                avg_engagement REAL DEFAULT 0.0,
+                UNIQUE(channel_id, date)
+            )
+        ''')
+        
+        # Таблица команд
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS commands_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,22 +147,7 @@ def init_database():
         logger.error(f"❌ Ошибка инициализации БД: {e}")
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-def log_command(user_id, command):
-    """Логирование команд пользователей"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO commands_log (user_id, command) VALUES (?, ?)",
-            (user_id, command)
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Ошибка логирования: {e}")
-
 def get_db_connection():
-    """Создание подключения к БД"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -128,875 +158,354 @@ def add_user(user_id, username, first_name):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Проверяем существует ли пользователь
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        if not cursor.fetchone():
-            cursor.execute('''
-                INSERT INTO users (user_id, username, first_name, last_activity)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, username, first_name, datetime.now()))
-            logger.info(f"👤 Добавлен пользователь: {user_id} ({username})")
+        cursor.execute('''
+            INSERT OR IGNORE INTO users (user_id, username, first_name, last_activity)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, first_name, datetime.now()))
         
         conn.commit()
         conn.close()
     except Exception as e:
         logger.error(f"Ошибка добавления пользователя: {e}")
 
-# ========== КОМАНДЫ БОТА ==========
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    """Обработчик команды /start"""
-    user = message.from_user
-    user_id = user.id
-    
-    # Добавляем пользователя в БД
-    add_user(user_id, user.username, user.first_name)
-    log_command(user_id, '/start')
-    
-    welcome_text = f"""
-🤖 **Добро пожаловать, {user.first_name}!**
-
-🎯 **Я — бот для аналитики Telegram-каналов.**
-
-📊 **Что я умею:**
-• Отслеживать статистику постов
-• Анализировать вовлеченность аудитории
-• Составлять рейтинги контента
-• Создавать отчеты в реальном времени
-
-🛠️ **Доступные команды:**
-/help — Показать все команды
-/stats — Статистика бота
-/top — Топ постов
-/test — Добавить тестовые данные
-/myinfo — Информация о вас
-
-🔧 **Начало работы:**
-1. Добавьте меня в канал как администратора
-2. Отправьте мне ссылку на канал (@username)
-3. Я начну сбор статистики!
-
-📈 **Сервер:** Render.com
-🆔 **Ваш ID:** `{user_id}`
-    """
-    
-    bot.reply_to(message, welcome_text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    """Обработчик команды /help"""
-    log_command(message.from_user.id, '/help')
-    
-    help_text = """
-📚 **СПРАВОЧНИК КОМАНД**
-
-🔹 **Основные команды:**
-/start — Начало работы
-/help — Эта справка
-/myinfo — Информация о вас
-/stats — Статистика бота
-
-🔹 **Статистика и аналитика:**
-/top [N] — Топ-N постов (по умолчанию 10)
-/channels — Список ваших каналов
-/export — Экспорт данных
-
-🔹 **Тестовые команды:**
-/test — Добавить тестовые данные
-/cleartest — Очистить тестовые данные
-
-🔹 **Административные (только для админов):**
-/users — Статистика пользователей
-/logs — Последние действия
-/restart — Перезапустить бота
-
-💡 **Примеры:**
-`/top 5` — показать топ-5 постов
-`/top 20` — показать топ-20 постов
-    """
-    
-    bot.reply_to(message, help_text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['stats'])
-def stats_command(message):
-    """Статистика бота"""
-    log_command(message.from_user.id, '/stats')
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Получаем статистику
-        cursor.execute("SELECT COUNT(*) FROM users")
-        users_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM channels")
-        channels_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM posts")
-        posts_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT SUM(views) FROM posts")
-        total_views = cursor.fetchone()[0] or 0
-        
-        cursor.execute("SELECT COUNT(*) FROM commands_log")
-        commands_count = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        # Определяем хостинг
-        if 'RENDER' in os.environ:
-            hosting = "Render.com 🚀"
-            plan = "Free (750 часов/месяц)"
-        else:
-            hosting = "Локальный сервер 💻"
-            plan = "Разработка"
-        
-        stats_text = f"""
-📊 **СТАТИСТИКА БОТА**
-
-👥 **Пользователи:**
-• Всего пользователей: {users_count}
-• Активных сегодня: {users_count} (обновляется)
-
-📈 **Данные:**
-• Отслеживается каналов: {channels_count}
-• Проанализировано постов: {posts_count}
-• Всего просмотров: {total_views:,}
-• Выполнено команд: {commands_count}
-
-⚙️ **Система:**
-• Хостинг: {hosting}
-• Тариф: {plan}
-• База данных: SQLite
-• Время сервера: {datetime.now().strftime('%H:%M:%S')}
-
-🔄 **Статус:** ✅ Активен
-        """
-        
-        bot.reply_to(message, stats_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Ошибка в stats_command: {e}")
-        bot.reply_to(message, "❌ Ошибка получения статистики")
-
-@bot.message_handler(commands=['top'])
-def top_posts_command(message):
-    """Топ постов по просмотрам"""
-    log_command(message.from_user.id, '/top')
-    
-    try:
-        # Получаем количество постов из аргумента
-        args = message.text.split()
-        limit = 10  # по умолчанию
-        
-        if len(args) > 1:
-            try:
-                limit = int(args[1])
-                limit = max(1, min(limit, 50))  # ограничение 1-50
-            except ValueError:
-                pass
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Получаем топ постов
-        cursor.execute('''
-            SELECT channel_id, post_id, message_text, views, forwards, reactions, post_date
-            FROM posts 
-            ORDER BY views DESC 
-            LIMIT ?
-        ''', (limit,))
-        
-        posts = cursor.fetchall()
-        conn.close()
-        
-        if not posts:
-            bot.reply_to(message, "📭 Нет данных для отображения.\nИспользуйте `/test` чтобы добавить тестовые данные.", parse_mode='Markdown')
-            return
-        
-        # Формируем ответ
-        response = f"🏆 **ТОП-{len(posts)} ПОСТОВ ПО ПРОСМОТРАМ**\n\n"
-        
-        medal_emojis = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        
-        for i, post in enumerate(posts):
-            if i < len(medal_emojis):
-                medal = medal_emojis[i]
-            else:
-                medal = f"{i+1}."
-            
-            # Форматируем текст поста
-            post_text = post['message_text'] or "Без текста"
-            if len(post_text) > 60:
-                post_text = post_text[:57] + "..."
-            
-            # Форматируем реакции
-            reactions_text = ""
-            if post['reactions']:
-                try:
-                    reactions = json.loads(post['reactions'])
-                    if reactions:
-                        reactions_text = " | "
-                        for emoji, count in list(reactions.items())[:3]:
-                            reactions_text += f"{emoji} {count} "
-                except:
-                    pass
-            
-            # Добавляем информацию о посте
-            response += f"{medal} **{post['views']:,}** просмотров\n"
-            response += f"   📍 {post['channel_id']}\n"
-            response += f"   📝 {post_text}\n"
-            response += f"   📤 {post['forwards']} репостов{reactions_text}\n"
-            response += f"   📅 {post['post_date'][:10] if post['post_date'] else 'N/A'}\n"
-            response += "   ─────────────\n"
-        
-        response += f"\n📊 Всего в топе: {len(posts)} постов"
-        
-        # Если сообщение слишком длинное, разбиваем
-        if len(response) > 4000:
-            parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
-            for part in parts:
-                bot.send_message(message.chat.id, part, parse_mode='Markdown')
-        else:
-            bot.reply_to(message, response, parse_mode='Markdown')
-            
-    except Exception as e:
-        logger.error(f"Ошибка в top_posts_command: {e}")
-        bot.reply_to(message, "❌ Ошибка получения топа постов")
-
-@bot.message_handler(commands=['test'])
-def test_command(message):
-    """Добавление тестовых данных"""
+# ========== НОВЫЕ КОМАНДЫ ДЛЯ РЕАЛЬНОЙ СТАТИСТИКИ ==========
+@bot.message_handler(commands=['add_channel'])
+def add_channel_command(message):
+    """Добавление канала для мониторинга"""
     user_id = message.from_user.id
+    add_user(user_id, message.from_user.username, message.from_user.first_name)
     
-    # Проверяем права (только админы или первые 10 пользователей)
+    # Проверяем права
     if user_id not in ADMIN_IDS:
-        # Проверяем порядковый номер пользователя
+        bot.reply_to(message, "❌ Эта команда доступна только администраторам.")
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "📝 Использование: `/add_channel @username_канала`", parse_mode='Markdown')
+        return
+    
+    channel_identifier = args[1].strip()
+    
+    # Проверяем формат
+    if not (channel_identifier.startswith('@') or channel_identifier.startswith('-100')):
+        bot.reply_to(message, "❌ Неверный формат. Используйте @username или -100...")
+        return
+    
+    bot.reply_to(message, f"🔍 Начинаю анализ канала {channel_identifier}...")
+    
+    # Запускаем анализ в фоне
+    def analyze_channel():
+        try:
+            if not channel_monitor:
+                bot.send_message(message.chat.id, "❌ Монитор каналов не инициализирован. Проверьте API_ID и API_HASH.")
+                return
+            
+            # Запускаем асинхронную задачу
+            async def analyze():
+                success = await channel_monitor.monitor_channel(channel_identifier)
+                if success:
+                    stats = await channel_monitor.get_detailed_stats(channel_identifier, days=7)
+                    if stats:
+                        response = format_channel_stats(stats)
+                        bot.send_message(message.chat.id, response, parse_mode='Markdown')
+                    else:
+                        bot.send_message(message.chat.id, "✅ Канал добавлен, но статистика недоступна")
+                else:
+                    bot.send_message(message.chat.id, "❌ Не удалось получить данные канала. Проверьте:\n1. Бот добавлен как администратор\n2. Канал существует\n3. Права 'Изменение сообщений'")
+            
+            asyncio.run(analyze())
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа канала: {e}")
+            bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    
+    thread = threading.Thread(target=analyze_channel, daemon=True)
+    thread.start()
+
+@bot.message_handler(commands=['channel_stats'])
+def channel_stats_command(message):
+    """Статистика конкретного канала"""
+    user_id = message.from_user.id
+    add_user(user_id, message.from_user.username, message.from_user.first_name)
+    
+    args = message.text.split()
+    if len(args) < 2:
+        # Показываем список отслеживаемых каналов
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users WHERE user_id <= ?", (user_id,))
-        user_number = cursor.fetchone()[0]
-        conn.close()
-        
-        if user_number > 10:
-            bot.reply_to(message, "❌ Эта команда доступна только администраторам и первым 10 пользователям.")
-            return
-    
-    log_command(user_id, '/test')
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Добавляем тестовые каналы
-        test_channels = [
-            ('@tech_news', 'Новости технологий'),
-            ('@startup_stories', 'Истории стартапов'),
-            ('@ai_research', 'Исследования ИИ'),
-            ('@cyber_security', 'Кибербезопасность'),
-            ('@digital_marketing', 'Цифровой маркетинг')
-        ]
-        
-        for channel_id, channel_name in test_channels:
-            cursor.execute('''
-                INSERT OR IGNORE INTO channels (channel_id, channel_name, added_by)
-                VALUES (?, ?, ?)
-            ''', (channel_id, channel_name, user_id))
-        
-        # Добавляем тестовые посты
-        import random
-        from datetime import datetime, timedelta
-        
-        for i in range(1, 21):
-            channel_id = random.choice(['@tech_news', '@startup_stories', '@ai_research'])
-            views = random.randint(1000, 50000)
-            forwards = random.randint(10, 500)
-            
-            # Генерируем случайные реакции
-            reactions_dict = {}
-            possible_reactions = ['👍', '❤️', '🔥', '👏', '🎯', '💯']
-            for _ in range(random.randint(1, 4)):
-                emoji = random.choice(possible_reactions)
-                count = random.randint(5, 200)
-                reactions_dict[emoji] = count
-            
-            # Случайная дата (последние 30 дней)
-            post_date = datetime.now() - timedelta(days=random.randint(0, 30))
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO posts 
-                (channel_id, post_id, message_text, views, forwards, reactions, post_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                channel_id,
-                i,
-                f"Тестовый пост #{i} о технологиях и инновациях",
-                views,
-                forwards,
-                json.dumps(reactions_dict),
-                post_date.strftime('%Y-%m-%d %H:%M:%S')
-            ))
-        
-        conn.commit()
-        conn.close()
-        
-        bot.reply_to(message, f"""
-✅ **Тестовые данные добавлены!**
-
-📁 Что добавлено:
-• 5 тестовых каналов
-• 20 тестовых постов
-• Реальные статистические данные
-
-📊 Теперь можете использовать:
-`/top` — посмотреть топ постов
-`/stats` — посмотреть общую статистику
-`/channels` — посмотреть список каналов
-
-🔄 Данные обновляются автоматически.
-        """, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Ошибка в test_command: {e}")
-        bot.reply_to(message, f"❌ Ошибка: {str(e)}")
-
-@bot.message_handler(commands=['myinfo'])
-def myinfo_command(message):
-    """Информация о пользователе"""
-    user = message.from_user
-    user_id = user.id
-    
-    log_command(user_id, '/myinfo')
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Получаем информацию о пользователе
         cursor.execute('''
-            SELECT username, first_name, join_date, last_activity,
-                   (SELECT COUNT(*) FROM commands_log WHERE user_id = ?) as command_count
-            FROM users 
-            WHERE user_id = ?
-        ''', (user_id, user_id))
-        
-        user_data = cursor.fetchone()
-        
-        if user_data:
-            username = user_data['username'] or "Не указан"
-            first_name = user_data['first_name'] or "Не указано"
-            join_date = user_data['join_date'] or "Неизвестно"
-            last_activity = user_data['last_activity'] or "Неизвестно"
-            command_count = user_data['command_count']
-            
-            # Проверяем является ли админом
-            is_admin = "✅ Да" if user_id in ADMIN_IDS else "❌ Нет"
-            
-            info_text = f"""
-👤 **ИНФОРМАЦИЯ О ВАС**
-
-🆔 **ID:** `{user_id}`
-👤 **Username:** @{username}
-📛 **Имя:** {first_name}
-
-📅 **Дата регистрации:** {join_date[:10]}
-⏰ **Последняя активность:** {last_activity[:16] if last_activity != 'Неизвестно' else 'Неизвестно'}
-
-📊 **Статистика:**
-• Выполнено команд: {command_count}
-• Администратор: {is_admin}
-
-🌐 **Хостинг:** Render.com
-🆓 **Тариф:** Бесплатный
-            """
-        else:
-            info_text = "❌ Информация не найдена. Попробуйте отправить /start"
-        
-        conn.close()
-        bot.reply_to(message, info_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Ошибка в myinfo_command: {e}")
-        bot.reply_to(message, "❌ Ошибка получения информации")
-
-@bot.message_handler(commands=['channels'])
-def channels_command(message):
-    """Список каналов"""
-    log_command(message.from_user.id, '/channels')
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT channel_id, channel_name, added_date, is_active
+            SELECT channel_id, channel_name, username, last_updated 
             FROM channels 
-            ORDER BY added_date DESC
-            LIMIT 20
+            WHERE is_active = 1 
+            ORDER BY last_updated DESC 
+            LIMIT 10
         ''')
-        
         channels = cursor.fetchall()
         conn.close()
         
         if not channels:
-            bot.reply_to(message, "📭 Нет добавленных каналов.\nИспользуйте `/test` чтобы добавить тестовые каналы.", parse_mode='Markdown')
-            return
-        
-        response = "📋 **СПИСОК КАНАЛОВ**\n\n"
-        
-        for i, channel in enumerate(channels, 1):
-            status = "✅ Активен" if channel['is_active'] else "⛔ Не активен"
-            response += f"{i}. **{channel['channel_id']}**\n"
-            if channel['channel_name']:
-                response += f"   Название: {channel['channel_name']}\n"
-            response += f"   Статус: {status}\n"
-            response += f"   Добавлен: {channel['added_date'][:10]}\n"
-            response += "   ─────────────\n"
-        
-        response += f"\n📊 Всего каналов: {len(channels)}"
+            response = "📭 Нет отслеживаемых каналов.\nИспользуйте `/add_channel @username` чтобы добавить."
+        else:
+            response = "📋 **ОТСЛЕЖИВАЕМЫЕ КАНАЛЫ:**\n\n"
+            for i, channel in enumerate(channels, 1):
+                updated = channel['last_updated'][:16] if channel['last_updated'] else 'никогда'
+                response += f"{i}. **{channel['channel_name']}**\n"
+                if channel['username']:
+                    response += f"   @{channel['username']}\n"
+                response += f"   📅 Обновлено: {updated}\n"
+                response += f"   📊 `/channel_stats {channel['channel_id']}`\n"
+                response += "   ─────────────\n"
         
         bot.reply_to(message, response, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Ошибка в channels_command: {e}")
-        bot.reply_to(message, "❌ Ошибка получения списка каналов")
-
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
-    """Обработка всех остальных сообщений"""
-    user = message.from_user
-    text = message.text
+        return
     
-    # Логируем сообщение
-    log_command(user.id, f"TEXT: {text[:50]}")
-    
-    # Добавляем пользователя если его нет
-    add_user(user.id, user.username, user.first_name)
-    
-    # Ответ на обычные сообщения
-    if text.startswith('@'):
-        bot.reply_to(message, f"""
-🔍 Канал {text} добавлен в список отслеживания!
-
-📋 Что дальше:
-1. Добавьте меня в канал как администратора
-2. Я начну собирать статистику автоматически
-
-📊 Уже можно посмотреть:
-`/channels` — список ваших каналов
-`/help` — все доступные команды
-        """, parse_mode='Markdown')
-    else:
-        bot.reply_to(message, f"""
-📝 Вы написали: "{text}"
-
-💡 Используйте команды:
-`/help` — показать все команды
-`/start` — начало работы
-`/test` — добавить тестовые данные
-
-🤖 Бот работает на Render.com
-        """, parse_mode='Markdown')
-
-# ========== FLASK МАРШРУТЫ ==========
-@app.route('/')
-def home():
-    """Главная страница веб-приложения"""
-    return """
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Telegram Analytics Bot</title>
-        <style>
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            }
-            
-            body {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                min-height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                padding: 20px;
-            }
-            
-            .container {
-                background: white;
-                border-radius: 20px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                width: 100%;
-                max-width: 800px;
-                overflow: hidden;
-            }
-            
-            .header {
-                background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
-                color: white;
-                padding: 40px;
-                text-align: center;
-            }
-            
-            .header h1 {
-                font-size: 2.5rem;
-                margin-bottom: 10px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 15px;
-            }
-            
-            .status-badge {
-                display: inline-block;
-                background: #10b981;
-                color: white;
-                padding: 5px 15px;
-                border-radius: 20px;
-                font-size: 0.9rem;
-                margin-top: 10px;
-            }
-            
-            .content {
-                padding: 40px;
-            }
-            
-            .stats-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 20px;
-                margin: 30px 0;
-            }
-            
-            .stat-card {
-                background: #f8fafc;
-                padding: 20px;
-                border-radius: 10px;
-                text-align: center;
-                border: 2px solid #e2e8f0;
-                transition: transform 0.3s, box-shadow 0.3s;
-            }
-            
-            .stat-card:hover {
-                transform: translateY(-5px);
-                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-            }
-            
-            .stat-card h3 {
-                color: #64748b;
-                font-size: 0.9rem;
-                margin-bottom: 10px;
-            }
-            
-            .stat-card .value {
-                font-size: 2rem;
-                font-weight: bold;
-                color: #1e293b;
-            }
-            
-            .features {
-                margin: 40px 0;
-            }
-            
-            .features h2 {
-                color: #1e293b;
-                margin-bottom: 20px;
-                text-align: center;
-            }
-            
-            .feature-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 20px;
-            }
-            
-            .feature-item {
-                background: #f1f5f9;
-                padding: 20px;
-                border-radius: 10px;
-                display: flex;
-                align-items: center;
-                gap: 15px;
-            }
-            
-            .feature-icon {
-                font-size: 2rem;
-                color: #4f46e5;
-            }
-            
-            .instructions {
-                background: #fef3c7;
-                padding: 25px;
-                border-radius: 10px;
-                margin: 30px 0;
-                border-left: 4px solid #f59e0b;
-            }
-            
-            .instructions h3 {
-                color: #92400e;
-                margin-bottom: 15px;
-            }
-            
-            .instructions ol {
-                padding-left: 20px;
-            }
-            
-            .instructions li {
-                margin-bottom: 10px;
-                color: #78350f;
-            }
-            
-            .footer {
-                text-align: center;
-                padding: 20px;
-                color: #64748b;
-                border-top: 1px solid #e2e8f0;
-                margin-top: 40px;
-            }
-            
-            .button {
-                display: inline-block;
-                background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
-                color: white;
-                padding: 15px 30px;
-                border-radius: 10px;
-                text-decoration: none;
-                font-weight: bold;
-                margin: 10px;
-                transition: transform 0.3s, box-shadow 0.3s;
-            }
-            
-            .button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 10px 25px rgba(79, 70, 229, 0.4);
-            }
-            
-            @media (max-width: 768px) {
-                .header {
-                    padding: 30px 20px;
-                }
-                
-                .header h1 {
-                    font-size: 2rem;
-                }
-                
-                .content {
-                    padding: 20px;
-                }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🤖 Telegram Analytics Bot</h1>
-                <p>Мощный инструмент для анализа статистики Telegram-каналов</p>
-                <div class="status-badge">✅ Статус: Активен</div>
-            </div>
-            
-            <div class="content">
-                <div style="text-align: center; margin-bottom: 30px;">
-                    <h2 style="color: #1e293b; margin-bottom: 20px;">📊 Аналитика в реальном времени</h2>
-                    <p style="color: #64748b; font-size: 1.1rem; max-width: 600px; margin: 0 auto 30px;">
-                        Отслеживайте просмотры, реакции, репосты и составляйте подробные отчеты по эффективности вашего контента
-                    </p>
-                    <a href="https://t.me/YOUR_BOT_USERNAME" class="button" target="_blank">💬 Открыть бота в Telegram</a>
-                    <a href="/stats" class="button">📈 Посмотреть статистику</a>
-                </div>
-                
-                <div class="stats-grid" id="statsContainer">
-                    <!-- Статистика будет загружена через JavaScript -->
-                    <div class="stat-card">
-                        <h3>👥 Пользователи</h3>
-                        <div class="value" id="usersCount">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <h3>📝 Посты</h3>
-                        <div class="value" id="postsCount">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <h3>👁️ Просмотры</h3>
-                        <div class="value" id="viewsCount">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <h3>🔥 Команды</h3>
-                        <div class="value" id="commandsCount">0</div>
-                    </div>
-                </div>
-                
-                <div class="instructions">
-                    <h3>🚀 Быстрый старт:</h3>
-                    <ol>
-                        <li>Откройте бота в Telegram по кнопке выше</li>
-                        <li>Отправьте команду <code>/start</code> для начала работы</li>
-                        <li>Используйте <code>/test</code> для добавления тестовых данных</li>
-                        <li>Анализируйте статистику командой <code>/stats</code></li>
-                        <li>Смотрите топ постов командой <code>/top</code></li>
-                    </ol>
-                </div>
-                
-                <div class="features">
-                    <h2>✨ Основные возможности</h2>
-                    <div class="feature-grid">
-                        <div class="feature-item">
-                            <div class="feature-icon">📈</div>
-                            <div>
-                                <h3 style="color: #1e293b;">Аналитика просмотров</h3>
-                                <p style="color: #64748b;">Отслеживание динамики просмотров по времени</p>
-                            </div>
-                        </div>
-                        <div class="feature-item">
-                            <div class="feature-icon">🔥</div>
-                            <div>
-                                <h3 style="color: #1e293b;">Анализ реакций</h3>
-                                <p style="color: #64748b;">Детальная статистика по всем типам реакций</p>
-                            </div>
-                        </div>
-                        <div class="feature-item">
-                            <div class="feature-icon">🏆</div>
-                            <div>
-                                <h3 style="color: #1e293b;">Рейтинги постов</h3>
-                                <p style="color: #64748b;">Топ контента по различным метрикам</p>
-                            </div>
-                        </div>
-                        <div class="feature-item">
-                            <div class="feature-icon">💾</div>
-                            <div>
-                                <h3 style="color: #1e293b;">Экспорт данных</h3>
-                                <p style="color: #64748b;">Выгрузка статистики в CSV и Excel</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="footer">
-                <p>🤖 Telegram Analytics Bot | 🚀 Хостинг: Render.com | 🆓 Тариф: Бесплатный</p>
-                <p>© 2024 | Все данные обрабатываются анонимно и защищены</p>
-            </div>
-        </div>
-        
-        <script>
-            // Загружаем статистику
-            async function loadStats() {
-                try {
-                    const response = await fetch('/api/stats');
-                    const data = await response.json();
-                    
-                    document.getElementById('usersCount').textContent = data.users || 0;
-                    document.getElementById('postsCount').textContent = data.posts || 0;
-                    document.getElementById('viewsCount').textContent = data.views ? data.views.toLocaleString() : 0;
-                    document.getElementById('commandsCount').textContent = data.commands || 0;
-                } catch (error) {
-                    console.error('Ошибка загрузки статистики:', error);
-                }
-            }
-            
-            // Обновляем время
-            function updateTime() {
-                const now = new Date();
-                document.getElementById('currentTime').textContent = 
-                    now.toLocaleTimeString('ru-RU') + ' ' + now.toLocaleDateString('ru-RU');
-            }
-            
-            // Обновляем статистику каждые 30 секунд
-            loadStats();
-            setInterval(loadStats, 30000);
-            
-            // Обновляем время каждую секунду
-            setInterval(updateTime, 1000);
-            updateTime();
-        </script>
-    </body>
-    </html>
-    """
-
-@app.route('/health')
-def health_check():
-    """Проверка здоровья приложения для Render"""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "service": "telegram-analytics-bot",
-        "version": "1.0.0"
-    })
-
-@app.route('/api/stats')
-def api_stats():
-    """API для получения статистики"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM users")
-        users = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM posts")
-        posts = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT SUM(views) FROM posts")
-        views = cursor.fetchone()[0] or 0
-        
-        cursor.execute("SELECT COUNT(*) FROM commands_log")
-        commands = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        return jsonify({
-            "status": "success",
-            "data": {
-                "users": users,
-                "posts": posts,
-                "views": views,
-                "commands": commands,
-                "timestamp": datetime.now().isoformat()
-            }
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Основной эндпоинт для вебхука Telegram"""
-    if request.headers.get('content-type') == 'application/json':
+    channel_identifier = args[1].strip()
+    days = 7
+    if len(args) > 2:
         try:
-            json_string = request.get_data().decode('utf-8')
-            update = telebot.types.Update.de_json(json_string)
-            bot.process_new_updates([update])
-            return ''
+            days = min(max(int(args[2]), 1), 30)
+        except:
+            pass
+    
+    bot.reply_to(message, f"📊 Анализирую статистику за {days} дней...")
+    
+    def get_stats():
+        try:
+            if not channel_monitor:
+                bot.send_message(message.chat.id, "❌ Монитор каналов не инициализирован.")
+                return
+            
+            async def fetch_stats():
+                stats = await channel_monitor.get_detailed_stats(channel_identifier, days)
+                if stats:
+                    response = format_channel_stats(stats)
+                    bot.send_message(message.chat.id, response, parse_mode='Markdown')
+                else:
+                    bot.send_message(message.chat.id, "❌ Не удалось получить статистику. Проверьте идентификатор канала.")
+            
+            asyncio.run(fetch_stats())
+            
         except Exception as e:
-            logger.error(f"Ошибка обработки вебхука: {e}")
-            return 'Error', 500
-    return 'Bad request', 400
+            logger.error(f"Ошибка получения статистики: {e}")
+            bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    
+    thread = threading.Thread(target=get_stats, daemon=True)
+    thread.start()
 
-# ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
-def start_bot_polling():
-    """Запуск polling бота в отдельном потоке (как fallback)"""
+def format_channel_stats(stats_data):
+    """Форматирование статистики канала для отправки"""
+    channel = stats_data['channel_info']
+    stats = stats_data['stats']
+    days = stats_data['period_days']
+    
+    response = f"📊 **СТАТИСТИКА КАНАЛА**\n\n"
+    response += f"**{channel['title']}**\n"
+    if channel.get('username'):
+        response += f"@{channel['username']}\n"
+    response += f"👥 Подписчиков: {channel.get('participants_count', 'N/A'):,}\n"
+    response += f"📅 Период: {days} дней\n"
+    response += f"📝 Сообщений: {stats['total_messages']}\n\n"
+    
+    response += f"👁️ **ПРОСМОТРЫ:**\n"
+    response += f"• Всего: {stats['total_views']:,}\n"
+    response += f"• В среднем: {stats['avg_views']:,.0f} на пост\n\n"
+    
+    response += f"📤 **РЕПОСТЫ:**\n"
+    response += f"• Всего: {stats['total_forwards']:,}\n"
+    response += f"• В среднем: {stats['avg_forwards']:,.1f} на пост\n\n"
+    
+    if stats['reactions_summary']:
+        response += f"🔥 **РЕАКЦИИ:**\n"
+        for emoji, count in list(stats['reactions_summary'].items())[:5]:
+            response += f"• {emoji}: {count:,}\n"
+        response += "\n"
+    
+    response += f"🏆 **ТОП-3 ПОСТА:**\n"
+    for i, post in enumerate(stats['top_posts'][:3], 1):
+        medal = ['🥇', '🥈', '🥉'][i-1] if i <= 3 else f"{i}."
+        response += f"{medal} **{post['views']:,}** просмотров\n"
+        response += f"   {post['text']}\n"
+        response += f"   📅 {post['date'][:10] if post['date'] else 'N/A'}\n"
+        response += "   ─────────────\n"
+    
+    # Ежедневная статистика
+    if stats['daily_stats']:
+        response += f"\n📈 **ДНЕВНАЯ СТАТИСТИКА:**\n"
+        for day, day_stats in list(stats['daily_stats'].items())[-5:]:
+            avg_views = day_stats['views'] / max(day_stats['posts'], 1)
+            response += f"• {day}: {day_stats['posts']} постов, {day_stats['views']:,} просмотров (avg: {avg_views:,.0f})\n"
+    
+    response += f"\n🔄 *Используйте `/update_channel {channel['id']}` для обновления*"
+    
+    return response
+
+@bot.message_handler(commands=['update_channel'])
+def update_channel_command(message):
+    """Обновление данных канала"""
+    user_id = message.from_user.id
+    
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "📝 Использование: `/update_channel @username_или_id`", parse_mode='Markdown')
+        return
+    
+    channel_identifier = args[1].strip()
+    
+    bot.reply_to(message, f"🔄 Обновляю данные канала {channel_identifier}...")
+    
+    def update_channel():
+        try:
+            if not channel_monitor:
+                bot.send_message(message.chat.id, "❌ Монитор каналов не инициализирован.")
+                return
+            
+            async def update():
+                success = await channel_monitor.monitor_channel(channel_identifier)
+                if success:
+                    bot.send_message(message.chat.id, f"✅ Данные канала {channel_identifier} обновлены!")
+                else:
+                    bot.send_message(message.chat.id, f"❌ Не удалось обновить канал {channel_identifier}")
+            
+            asyncio.run(update())
+            
+        except Exception as e:
+            logger.error(f"Ошибка обновления канала: {e}")
+            bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    
+    thread = threading.Thread(target=update_channel, daemon=True)
+    thread.start()
+
+@bot.message_handler(commands=['compare'])
+def compare_channels_command(message):
+    """Сравнение нескольких каналов"""
+    user_id = message.from_user.id
+    add_user(user_id, message.from_user.username, message.from_user.first_name)
+    
+    args = message.text.split()
+    if len(args) < 3:
+        bot.reply_to(message, "📝 Использование: `/compare @канал1 @канал2 [дней=7]`", parse_mode='Markdown')
+        return
+    
+    channels = args[1:3]
+    days = 7
+    if len(args) > 3:
+        try:
+            days = min(max(int(args[3]), 1), 30)
+        except:
+            pass
+    
+    bot.reply_to(message, f"📊 Сравниваю каналы за {days} дней...")
+    
+    def compare():
+        try:
+            if not channel_monitor:
+                bot.send_message(message.chat.id, "❌ Монитор каналов не инициализирован.")
+                return
+            
+            async def fetch_comparison():
+                results = []
+                for channel in channels:
+                    stats = await channel_monitor.get_detailed_stats(channel, days)
+                    if stats:
+                        results.append({
+                            'channel': stats['channel_info']['title'],
+                            'stats': stats['stats']
+                        })
+                
+                if len(results) == 2:
+                    response = format_comparison(results, days)
+                    bot.send_message(message.chat.id, response, parse_mode='Markdown')
+                else:
+                    bot.send_message(message.chat.id, "❌ Не удалось сравнить каналы. Проверьте идентификаторы.")
+            
+            asyncio.run(fetch_comparison())
+            
+        except Exception as e:
+            logger.error(f"Ошибка сравнения каналов: {e}")
+            bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+    
+    thread = threading.Thread(target=compare, daemon=True)
+    thread.start()
+
+def format_comparison(results, days):
+    """Форматирование сравнения каналов"""
+    chan1, chan2 = results[0], results[1]
+    
+    response = f"⚖️ **СРАВНЕНИЕ КАНАЛОВ**\n\n"
+    response += f"📅 Период: {days} дней\n\n"
+    
+    # Таблица сравнения
+    response += "| Метрика | **{0}** | **{1}** |\n".format(
+        chan1['channel'][:15], 
+        chan2['channel'][:15]
+    )
+    response += "|---------|---------|---------|\n"
+    
+    metrics = [
+        ("📝 Посты", chan1['stats']['total_messages'], chan2['stats']['total_messages']),
+        ("👁️ Просмотры", chan1['stats']['total_views'], chan2['stats']['total_views']),
+        ("📤 Репосты", chan1['stats']['total_forwards'], chan2['stats']['total_forwards']),
+        ("📊 Средние просмотры", int(chan1['stats']['avg_views']), int(chan2['stats']['avg_views'])),
+        ("🚀 Эффективность", 
+         f"{chan1['stats']['avg_views']/max(chan1['stats']['avg_forwards'], 1):.1f}x", 
+         f"{chan2['stats']['avg_views']/max(chan2['stats']['avg_forwards'], 1):.1f}x")
+    ]
+    
+    for name, val1, val2 in metrics:
+        winner = "🏆" if val1 > val2 else ("🤝" if val1 == val2 else "")
+        response += f"| {name} | {val1:,} {winner} | {val2:,} |\n"
+    
+    # Анализ
+    response += f"\n📈 **АНАЛИЗ:**\n"
+    
+    if chan1['stats']['avg_views'] > chan2['stats']['avg_views']:
+        response += f"• **{chan1['channel']}** имеет более высокий средний охват\n"
+    else:
+        response += f"• **{chan2['channel']}** имеет более высокий средний охват\n"
+    
+    engagement1 = chan1['stats']['avg_views'] / max(chan1['stats']['avg_forwards'], 1)
+    engagement2 = chan2['stats']['avg_views'] / max(chan2['stats']['avg_forwards'], 1)
+    
+    if engagement1 > engagement2:
+        response += f"• **{chan1['channel']}** имеет лучшее соотношение просмотров/репостов\n"
+    else:
+        response += f"• **{chan2['channel']}** имеет лучшее соотношение просмотров/репостов\n"
+    
+    return response
+
+# ========== ФОНОВЫЕ ЗАДАЧИ ==========
+def background_monitoring():
+    """Фоновый мониторинг каналов"""
     while True:
         try:
-            logger.info("🔄 Запуск бота в режиме polling...")
-            bot.polling(none_stop=True, interval=0, timeout=20)
-        except Exception as e:
-            logger.error(f"❌ Ошибка в polling: {e}")
-            time.sleep(5)
-
-if __name__ == '__main__':
-    # Инициализируем базу данных
-    init_database()
-    
-    # Запускаем polling в отдельном потоке как fallback
-    polling_thread = threading.Thread(target=start_bot_polling, daemon=True)
-    polling_thread.start()
-    
-    # Запускаем Flask приложение
-    port = int(os.environ.get('PORT', 5000))
-    logger.info(f"🚀 Запуск Flask приложения на порту {port}")
-    logger.info(f"🌐 Веб-приложение доступно по: http://localhost:{port}")
-    logger.info(f"🤖 Бот токен: {'Установлен' if BOT_TOKEN else 'НЕ УСТАНОВЛЕН!'}")
-    
-    app.run(host='0.0.0.0', port=port, debug=False)
+            if channel_monitor:
+                # Получаем список активных каналов
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT channel_id, username 
+                    FROM channels 
+                    WHERE is_active = 1 
+                    ORDER BY last_updated ASC 
+                    LIMIT 5
+                ''')
+                channels = cursor.fetchall()
+                conn.close()
+                
+                # Обновляем каждый канал
+                for channel in channels:
+                    try:
+                        identifier = f"@{channel['username']}" if channel['username'] else str(channel['channel_id'])
+                        
+                        async def update():
+                            await channel_monitor.monitor_channel(identifier)
+                        
+                        asyncio.run(update())
+                        logger.info(f"✅ Фоновое обновление канала {identifier}")
+                        time.sleep(10)  # Пауза между каналами
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка фонового обновления канала {channel['channel_id']}: {e}")
+            
+            # Ж
