@@ -8,6 +8,7 @@ import threading
 import time
 import logging
 import random
+import traceback
 
 # ========== НАСТРОЙКА ЛОГГИРОВАНИЯ ==========
 logging.basicConfig(
@@ -18,17 +19,12 @@ logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = "8519907445:AAGQKcnBDHoCsc3exLB7BjQpk3281SeIdHc"
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не установлен!")
-
-ADMIN_IDS = [1851663626]  # ВАШ ID
-
-# Динамическая ссылка на бота
+ADMIN_IDS = [1851663626]
 BOT_USERNAME = "Goononkhamun_bot"
 BOT_LINK = f"https://t.me/{BOT_USERNAME}"
 
 # Инициализация бота и Flask
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)  # Отключаем многопоточность для вебхука
 app = Flask(__name__)
 
 # ========== БАЗА ДАННЫХ ==========
@@ -92,6 +88,7 @@ def init_database():
         
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
+        logger.error(traceback.format_exc())
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def get_db_connection():
@@ -128,13 +125,47 @@ def log_command(user_id, command):
         logger.error(f"Ошибка логирования: {e}")
 
 # ========== КОМАНДЫ БОТА ==========
-@bot.message_handler(commands=['start'])
-def start_command(message):
+@bot.message_handler(commands=['start', 'help', 'stats', 'top', 'test', 'channels', 'about', 'status', 'myinfo'])
+def handle_commands(message):
+    """Обработчик всех команд"""
+    try:
+        command = message.text.split()[0].lower()
+        user = message.from_user
+        
+        logger.info(f"📨 Команда от {user.id} (@{user.username}): {command}")
+        
+        # Добавляем пользователя и логируем команду
+        add_user(user.id, user.username, user.first_name)
+        log_command(user.id, command)
+        
+        # Перенаправляем на соответствующий обработчик
+        if command == '/start':
+            handle_start(message)
+        elif command == '/help':
+            handle_help(message)
+        elif command == '/stats':
+            handle_stats(message)
+        elif command == '/top':
+            handle_top(message)
+        elif command == '/test':
+            handle_test(message)
+        elif command == '/channels':
+            handle_channels(message)
+        elif command == '/about':
+            handle_about(message)
+        elif command == '/status':
+            handle_status(message)
+        elif command == '/myinfo':
+            handle_myinfo(message)
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки команды: {e}")
+        logger.error(traceback.format_exc())
+        bot.reply_to(message, "❌ Произошла ошибка при обработке команды")
+
+def handle_start(message):
     """Команда /start"""
     user = message.from_user
-    add_user(user.id, user.username, user.first_name)
-    log_command(user.id, '/start')
-    
     welcome_text = f"""
 👋 Привет, {user.first_name}!
 
@@ -146,19 +177,17 @@ def start_command(message):
 `/channels` — список каналов
 `/test` — тестовые данные
 `/help` — все команды
+`/myinfo` — информация о вас
+`/status` — статус сервера
 
 🚀 **Хостинг:** Render.com
 🔗 **Ссылка:** {BOT_LINK}
 🆔 **Ваш ID:** `{user.id}`
     """
-    
     bot.reply_to(message, welcome_text, parse_mode='Markdown')
 
-@bot.message_handler(commands=['help'])
-def help_command(message):
+def handle_help(message):
     """Команда /help"""
-    log_command(message.from_user.id, '/help')
-    
     help_text = f"""
 📚 **ПОЛНЫЙ СПИСОК КОМАНД:**
 
@@ -169,7 +198,7 @@ def help_command(message):
 `/myinfo` — Информация о вас
 
 🔹 **Аналитика:**
-`/top [N]` — Топ-N постов
+`/top [N]` — Топ-N постов (по умолчанию 10)
 `/channels` — Список каналов
 
 🔹 **Тестовые:**
@@ -181,15 +210,12 @@ def help_command(message):
 
 🔗 **Ссылка:** {BOT_LINK}
 🌐 **Сервер:** Render.com
+📊 **База данных:** SQLite
     """
-    
     bot.reply_to(message, help_text, parse_mode='Markdown')
 
-@bot.message_handler(commands=['stats'])
-def stats_command(message):
+def handle_stats(message):
     """Статистика бота"""
-    log_command(message.from_user.id, '/stats')
-    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -209,6 +235,9 @@ def stats_command(message):
         cursor.execute("SELECT COUNT(*) FROM commands_log")
         commands = cursor.fetchone()[0]
         
+        cursor.execute("SELECT strftime('%Y-%m-%d', executed_at) as date, COUNT(*) FROM commands_log GROUP BY date ORDER BY date DESC LIMIT 7")
+        recent_commands = cursor.fetchall()
+        
         conn.close()
         
         stats_text = f"""
@@ -220,10 +249,17 @@ def stats_command(message):
 👁️ Просмотров: {views:,}
 ⚡ Команд: {commands}
 
+📈 **Активность (7 дней):**
+"""
+        for row in recent_commands:
+            stats_text += f"• {row['date']}: {row['COUNT(*)']} команд\n"
+
+        stats_text += f"""
 🌐 **СЕРВЕР:**
 • Хостинг: Render.com
 • Статус: ✅ Активен
 • Время: {datetime.now().strftime('%H:%M:%S')}
+• Бот: @{BOT_USERNAME}
 
 🔗 **Ссылка:** {BOT_LINK}
         """
@@ -231,14 +267,11 @@ def stats_command(message):
         bot.reply_to(message, stats_text, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Ошибка в stats_command: {e}")
+        logger.error(f"Ошибка в stats: {e}")
         bot.reply_to(message, "❌ Ошибка получения статистики")
 
-@bot.message_handler(commands=['top'])
-def top_posts_command(message):
+def handle_top(message):
     """Топ постов по просмотрам"""
-    log_command(message.from_user.id, '/top')
-    
     try:
         args = message.text.split()
         limit = 10
@@ -258,6 +291,7 @@ def top_posts_command(message):
                    p.reactions, c.channel_name
             FROM posts p
             LEFT JOIN channels c ON p.channel_id = c.channel_id
+            WHERE p.views > 0
             ORDER BY p.views DESC 
             LIMIT ?
         ''', (limit,))
@@ -266,7 +300,7 @@ def top_posts_command(message):
         conn.close()
         
         if not posts:
-            bot.reply_to(message, "📭 Нет данных. Используйте `/test`", parse_mode='Markdown')
+            bot.reply_to(message, "📭 Нет данных о постах. Используйте `/test` для добавления тестовых данных.", parse_mode='Markdown')
             return
         
         response = f"🏆 **ТОП-{len(posts)} ПОСТОВ**\n\n"
@@ -285,21 +319,18 @@ def top_posts_command(message):
             response += f"   📝 {text}\n"
             if post['forwards'] > 0:
                 response += f"   📤 {post['forwards']} репостов\n"
-            response += "   ─────────────\n"
+            response += "\n"
         
-        response += f"\n📊 Всего в топе: {len(posts)} постов"
+        response += f"📊 Всего в топе: {len(posts)} постов"
         
         bot.reply_to(message, response, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Ошибка в top_posts_command: {e}")
+        logger.error(f"Ошибка в top: {e}")
         bot.reply_to(message, "❌ Ошибка получения топа")
 
-@bot.message_handler(commands=['test'])
-def test_command(message):
+def handle_test(message):
     """Добавление тестовых данных"""
-    log_command(message.from_user.id, '/test')
-    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -356,39 +387,50 @@ def test_command(message):
                 (datetime.now() - timedelta(days=random.randint(0, 30))).isoformat()
             ))
         
+        # Тестовые пользователи (если нет)
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] < 5:
+            for i in range(5):
+                cursor.execute('''
+                    INSERT OR IGNORE INTO users (user_id, username, first_name, last_activity)
+                    VALUES (?, ?, ?, ?)
+                ''', (1000000 + i, f"test_user_{i}", f"Test {i}", datetime.now()))
+        
         conn.commit()
         conn.close()
         
         bot.reply_to(message, f"""
 ✅ **Тестовые данные добавлены!**
 
-📁 Добавлено:
+📁 Добавлено/обновлено:
 • 3 тестовых канала
 • 30 тестовых постов
+• 5 тестовых пользователей
 
-📊 Теперь можете:
+📊 Теперь можете использовать:
 `/top` — посмотреть топ постов
 `/stats` — общую статистику
 `/channels` — список каналов
+
+💡 *Данные сгенерированы случайным образом*
         """, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Ошибка в test_command: {e}")
-        bot.reply_to(message, f"❌ Ошибка: {str(e)}")
+        logger.error(f"Ошибка в test: {e}")
+        bot.reply_to(message, f"❌ Ошибка: {str(e)[:100]}")
 
-@bot.message_handler(commands=['channels'])
-def channels_command(message):
+def handle_channels(message):
     """Список каналов"""
-    log_command(message.from_user.id, '/channels')
-    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute('''
             SELECT channel_name, username, added_date,
-                   (SELECT COUNT(*) FROM posts WHERE channel_id = channels.channel_id) as posts_count
+                   (SELECT COUNT(*) FROM posts WHERE channel_id = channels.channel_id) as posts_count,
+                   (SELECT SUM(views) FROM posts WHERE channel_id = channels.channel_id) as total_views
             FROM channels 
+            WHERE is_active = 1
             ORDER BY added_date DESC 
             LIMIT 10
         ''')
@@ -397,37 +439,174 @@ def channels_command(message):
         conn.close()
         
         if not channels:
-            bot.reply_to(message, "📭 Нет каналов. Используйте `/test`", parse_mode='Markdown')
+            bot.reply_to(message, "📭 Нет каналов в базе данных. Используйте `/test` для добавления тестовых данных.", parse_mode='Markdown')
             return
         
         response = "📋 **СПИСОК КАНАЛОВ**\n\n"
         
         for i, channel in enumerate(channels, 1):
+            total_views = channel['total_views'] or 0
             response += f"{i}. **{channel['channel_name']}**\n"
             if channel['username']:
                 response += f"   @{channel['username']}\n"
             response += f"   📝 Постов: {channel['posts_count']}\n"
+            response += f"   👁️ Просмотров: {total_views:,}\n"
             response += f"   📅 Добавлен: {channel['added_date'][:10]}\n"
-            response += "   ─────────────\n"
+            response += "\n"
         
-        response += f"\n📊 Всего каналов: {len(channels)}"
+        response += f"📊 Всего активных каналов: {len(channels)}"
         
         bot.reply_to(message, response, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Ошибка в channels_command: {e}")
+        logger.error(f"Ошибка в channels: {e}")
         bot.reply_to(message, "❌ Ошибка получения списка")
+
+def handle_about(message):
+    """О боте"""
+    about_text = f"""
+🤖 **Telegram Analytics Bot**
+
+**Описание:**
+Бот для анализа статистики Telegram-каналов.
+Собирает данные по просмотрам, реакциям, репостам.
+
+**Возможности:**
+• Топ постов по просмотрам
+• Статистика каналов
+• Тестовые данные
+• Веб-интерфейс
+
+**Технологии:**
+• Python 3.9+
+• Telebot (pyTelegramBotAPI)
+• Flask
+• SQLite
+• Render.com (хостинг)
+
+**Команды:** `/help`
+**Ссылка:** {BOT_LINK}
+**Автор:** @Goononkhamun_bot
+
+📊 *Версия 2.0.0*
+    """
+    bot.reply_to(message, about_text, parse_mode='Markdown')
+
+def handle_status(message):
+    """Статус сервера"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        table_names = [row[0] for row in cursor.fetchall()]
+        
+        conn.close()
+        
+        status_text = f"""
+🟢 **СТАТУС СЕРВЕРА**
+
+**Бот:**
+• Имя: @{BOT_USERNAME}
+• Статус: ✅ Активен
+• Режим: Вебхук
+• Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+**База данных:**
+• Таблиц: {tables}
+• Имена: {', '.join(table_names)}
+• Путь: {DB_PATH}
+
+**Сервер:**
+• Хостинг: Render.com
+• Регион: США
+• Таймзон: UTC
+
+**Ссылки:**
+• Бот: {BOT_LINK}
+• Веб-интерфейс: https://telegram-analytics-bot-jhdy.onrender.com
+• Статус: https://telegram-analytics-bot-jhdy.onrender.com/health
+
+💡 *Все системы работают нормально*
+        """
+        
+        bot.reply_to(message, status_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Ошибка в status: {e}")
+        bot.reply_to(message, f"❌ Ошибка проверки статуса: {str(e)[:100]}")
+
+def handle_myinfo(message):
+    """Информация о пользователе"""
+    user = message.from_user
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT join_date, last_activity,
+                   (SELECT COUNT(*) FROM commands_log WHERE user_id = ?) as commands_count
+            FROM users 
+            WHERE user_id = ?
+        ''', (user.id, user.id))
+        
+        user_data = cursor.fetchone()
+        conn.close()
+        
+        if user_data:
+            join_date = user_data['join_date'][:10] if user_data['join_date'] else "Неизвестно"
+            last_activity = user_data['last_activity'] or "Неизвестно"
+            commands_count = user_data['commands_count']
+        else:
+            join_date = "Сегодня"
+            last_activity = "Сейчас"
+            commands_count = 1
+        
+        myinfo_text = f"""
+👤 **ИНФОРМАЦИЯ О ВАС**
+
+**Основное:**
+• ID: `{user.id}`
+• Имя: {user.first_name or "Не указано"}
+• Фамилия: {user.last_name or "Не указана"}
+• Username: @{user.username or "Не указан"}
+• Язык: {user.language_code or "Неизвестно"}
+
+**Активность:**
+• Дата регистрации: {join_date}
+• Последняя активность: {last_activity[:19]}
+• Выполнено команд: {commands_count}
+
+**Бот:**
+• Ссылка: {BOT_LINK}
+• Версия: 2.0.0
+• Статус: ✅ Активен
+
+💡 *Данные хранятся в защищенной базе данных*
+        """
+        
+        bot.reply_to(message, myinfo_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Ошибка в myinfo: {e}")
+        bot.reply_to(message, f"❌ Ошибка получения информации: {str(e)[:100]}")
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
-    """Обработка всех сообщений"""
+    """Обработка всех остальных сообщений"""
     user = message.from_user
     text = message.text
+    
+    logger.info(f"💬 Сообщение от {user.id}: {text[:50]}...")
     
     add_user(user.id, user.username, user.first_name)
     log_command(user.id, f"TEXT: {text[:30]}")
     
-    bot.reply_to(message, f"""
+    help_response = f"""
 🤖 **Telegram Analytics Bot**
 
 📝 Вы написали: "{text[:50]}"
@@ -435,11 +614,19 @@ def handle_all_messages(message):
 💡 **Основные команды:**
 `/start` — начало работы
 `/help` — все команды
+`/myinfo` — информация о вас
 `/test` — тестовые данные
 `/stats` — статистика
+`/top` — топ постов
+`/channels` — список каналов
 
 🔗 **Ссылка:** {BOT_LINK}
-    """, parse_mode='Markdown')
+📊 **Статус:** `/status`
+
+❓ *Не знаете что делать? Напишите /help*
+    """
+    
+    bot.reply_to(message, help_response, parse_mode='Markdown')
 
 # ========== FLASK МАРШРУТЫ ==========
 @app.route('/')
@@ -471,113 +658,39 @@ def home():
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    max-width: 800px;
-                    margin: 0 auto;
-                    padding: 20px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    min-height: 100vh;
-                    color: white;
-                }}
-                .container {{
-                    background: rgba(255, 255, 255, 0.95);
-                    color: #333;
-                    padding: 40px;
-                    border-radius: 20px;
-                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                }}
-                h1 {{
-                    color: #4f46e5;
-                    text-align: center;
-                    font-size: 2.5rem;
-                }}
-                .stats {{
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                    gap: 20px;
-                    margin: 40px 0;
-                }}
-                .stat-card {{
-                    background: #f8fafc;
-                    padding: 20px;
-                    border-radius: 10px;
-                    text-align: center;
-                    border: 2px solid #e2e8f0;
-                }}
-                .stat-card h3 {{
-                    color: #64748b;
-                    margin: 0 0 10px 0;
-                }}
-                .stat-card .value {{
-                    font-size: 2rem;
-                    font-weight: bold;
-                    color: #1e293b;
-                }}
-                .button {{
-                    display: inline-block;
-                    background: #4f46e5;
-                    color: white;
-                    padding: 15px 30px;
-                    text-decoration: none;
-                    border-radius: 10px;
-                    margin: 10px;
-                    font-weight: bold;
-                    transition: transform 0.3s;
-                }}
-                .button:hover {{
-                    transform: translateY(-2px);
-                    background: #4338ca;
-                }}
-                .footer {{
-                    text-align: center;
-                    margin-top: 40px;
-                    color: #64748b;
-                }}
+                body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; color: white; }}
+                .container {{ background: rgba(255, 255, 255, 0.95); color: #333; padding: 40px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }}
+                h1 {{ color: #4f46e5; text-align: center; font-size: 2.5rem; }}
+                .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 40px 0; }}
+                .stat-card {{ background: #f8fafc; padding: 20px; border-radius: 10px; text-align: center; border: 2px solid #e2e8f0; }}
+                .button {{ display: inline-block; background: #4f46e5; color: white; padding: 15px 30px; text-decoration: none; border-radius: 10px; margin: 10px; font-weight: bold; transition: transform 0.3s; }}
+                .button:hover {{ transform: translateY(-2px); background: #4338ca; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <h1>🤖 Telegram Analytics Bot</h1>
-                
                 <div style="text-align: center; margin: 20px 0; padding: 15px; background: #dcfce7; border-radius: 10px; color: #166534;">
                     <h2 style="margin: 0;">✅ Статус: Активен</h2>
-                    <p style="margin: 5px 0;">Username: @{BOT_USERNAME} | Сервер: Render.com</p>
+                    <p style="margin: 5px 0;">Бот: @{BOT_USERNAME} | Сервер: Render.com</p>
                 </div>
-                
                 <div class="stats">
-                    <div class="stat-card">
-                        <h3>👥 Пользователи</h3>
-                        <div class="value">{users}</div>
-                    </div>
-                    <div class="stat-card">
-                        <h3>📁 Каналы</h3>
-                        <div class="value">{channels}</div>
-                    </div>
-                    <div class="stat-card">
-                        <h3>📝 Посты</h3>
-                        <div class="value">{posts}</div>
-                    </div>
-                    <div class="stat-card">
-                        <h3>👁️ Просмотры</h3>
-                        <div class="value">{views:,}</div>
-                    </div>
+                    <div class="stat-card"><h3>👥 Пользователи</h3><div class="value">{users}</div></div>
+                    <div class="stat-card"><h3>📁 Каналы</h3><div class="value">{channels}</div></div>
+                    <div class="stat-card"><h3>📝 Посты</h3><div class="value">{posts}</div></div>
+                    <div class="stat-card"><h3>👁️ Просмотры</h3><div class="value">{views:,}</div></div>
                 </div>
-                
                 <div style="text-align: center; margin: 40px 0;">
                     <h2>✨ Аналитика Telegram-каналов</h2>
-                    <p>Сбор статистики по просмотрам, реакциям, репостам</p>
-                    
                     <div style="margin: 30px 0;">
                         <a href="{BOT_LINK}" class="button" target="_blank">💬 Открыть @{BOT_USERNAME}</a>
                         <a href="/health" class="button">🔧 Проверка здоровья</a>
                         <a href="/api/stats" class="button">📊 API Статистика</a>
                     </div>
                 </div>
-                
-                <div class="footer">
-                    <p>🚀 Хостинг: Render.com (Free Tier) | 🐍 Python 3.9 | 💾 SQLite</p>
-                    <p>© 2024 Telegram Analytics Bot</p>
+                <div style="text-align: center; color: #64748b;">
+                    <p>🚀 Хостинг: Render.com | 🐍 Python 3.9 | 💾 SQLite</p>
+                    <p>© 2024 Telegram Analytics Bot | Версия 2.0</p>
                 </div>
             </div>
         </body>
@@ -586,17 +699,12 @@ def home():
     except Exception as e:
         return f"""
         <!DOCTYPE html>
-        <html>
-        <head><title>Telegram Analytics Bot</title></head>
+        <html><head><title>Telegram Analytics Bot</title></head>
         <body style="font-family: Arial; padding: 20px;">
-            <h1>🤖 Telegram Analytics Bot</h1>
-            <p>✅ Статус: Активен</p>
+            <h1>🤖 Telegram Analytics Bot</h1><p>✅ Статус: Активен</p>
             <p>🔗 Ссылка: <a href="{BOT_LINK}">{BOT_LINK}</a></p>
-            <a href="{BOT_LINK}" style="background: #4f46e5; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
-                💬 Открыть бота
-            </a>
-        </body>
-        </html>
+            <a href="{BOT_LINK}" style="background: #4f46e5; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">💬 Открыть бота</a>
+        </body></html>
         """
 
 @app.route('/health')
@@ -608,7 +716,7 @@ def health_check():
         "bot_username": BOT_USERNAME,
         "bot_link": BOT_LINK,
         "server": "Render.com",
-        "webhook": "active"
+        "version": "2.0.0"
     })
 
 @app.route('/api/stats')
@@ -637,28 +745,36 @@ def api_stats():
                 "users": users,
                 "channels": channels,
                 "posts": posts
-            }
+            },
+            "version": "2.0.0"
         })
     except Exception as e:
         return jsonify({
             "status": "error",
             "bot_username": BOT_USERNAME,
-            "error": str(e)
+            "error": str(e)[:200],
+            "timestamp": datetime.now().isoformat()
         }), 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Вебхук Telegram"""
-    if request.headers.get('content-type') == 'application/json':
-        try:
+    try:
+        if request.headers.get('content-type') == 'application/json':
             json_string = request.get_data().decode('utf-8')
+            logger.info(f"📥 Вебхук получен: {json_string[:200]}...")
+            
             update = telebot.types.Update.de_json(json_string)
             bot.process_new_updates([update])
-            return ''
-        except Exception as e:
-            logger.error(f"Ошибка вебхука: {e}")
-            return 'Error', 500
-    return 'Bad request', 400
+            
+            return jsonify({"status": "ok"}), 200
+        else:
+            logger.warning("⚠️ Неверный Content-Type")
+            return jsonify({"error": "Invalid content type"}), 400
+    except Exception as e:
+        logger.error(f"❌ Ошибка вебхука: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({"error": str(e)[:200]}), 500
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
@@ -669,16 +785,29 @@ if __name__ == '__main__':
     
     logger.info(f"✅ Бот: @{BOT_USERNAME}")
     logger.info(f"🔗 Ссылка: {BOT_LINK}")
+    
+    # Настройка вебхука при запуске
+    try:
+        if 'RENDER' in os.environ:
+            webhook_url = "https://telegram-analytics-bot-jhdy.onrender.com/webhook"
+            bot.remove_webhook()
+            time.sleep(1)
+            bot.set_webhook(url=webhook_url, max_connections=50)
+            logger.info(f"✅ Вебхук установлен: {webhook_url}")
+            
+            # Проверяем настройку
+            webhook_info = bot.get_webhook_info()
+            logger.info(f"✅ Вебхук настроен: {webhook_info.url}")
+            logger.info(f"✅ Ожидание обновлений...")
+    except Exception as e:
+        logger.error(f"❌ Ошибка настройки вебхука: {e}")
+    
     logger.info("🌐 Веб-приложение запускается...")
-    logger.info("📡 Режим: Вебхук (без polling)")
+    logger.info("📡 Режим: Вебхук")
     
     # Запуск Flask
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
-    
-
-
-
 
 
 
