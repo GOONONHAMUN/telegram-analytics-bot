@@ -1158,7 +1158,7 @@ def home():
                     <p>Сбор статистики по просмотрам, реакциям, репостам</p>
                     
                     <div style="margin: 30px 0;">
-                        <a href="https://t.me/YOUR_BOT_USERNAME" class="button" target="_blank">💬 Открыть бота в Telegram</a>
+                        <a href="https://t.me/Goononkhamun_bot" class="button" target="_blank">💬 Открыть бота в Telegram</a>
                         <a href="/health" class="button">🔧 Проверка здоровья</a>
                         <a href="/api/stats" class="button">📊 API Статистика</a>
                     </div>
@@ -1287,4 +1287,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
     
+
 
