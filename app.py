@@ -597,7 +597,7 @@ def home():
                     <p>Сбор статистики по просмотрам, реакциям, репостам</p>
                     
                     <div style="margin: 30px 0;">
-                        <a href="{BOT_LINK}" class="button" target="_blank">💬 Открыть @{BOT_USERNAME}</a>
+                        <a href="{BOT_LINK}" class="button" target="_blank">💬 Открыть @{Goononkhamun_bot}</a>
                         <a href="/health" class="button">🔧 Проверка здоровья</a>
                         <a href="/api/stats" class="button">📊 API Статистика</a>
                     </div>
@@ -703,5 +703,6 @@ if __name__ == '__main__':
     # Запуск Flask
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
