@@ -17,18 +17,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
-BOT_TOKEN = os.environ.get('8519907445:AAGQKcnBDHoCsc3exLB7BjQpk3281SeIdHc')
+BOT_TOKEN = "8519907445:AAGQKcnBDHoCsc3exLB7BjQpk3281SeIdHc"
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не установлен!")
-    # Для теста можно временно указать здесь
-    # BOT_TOKEN = "ваш_токен"
 
-ADMIN_IDS = [int(id.strip()) for id in os.environ.get('ADMIN_IDS', '').split(',') if id.strip()]
-if not ADMIN_IDS:
-    ADMIN_IDS = [1851663626]  # ЗАМЕНИТЕ НА ВАШ ID
+ADMIN_IDS = [1851663626]  # ВАШ ID
 
 # Динамическая ссылка на бота
-BOT_USERNAME = os.environ.get('BOT_USERNAME', 'Goononkhamun_bot')
+BOT_USERNAME = "Goononkhamun_bot"
 BOT_LINK = f"https://t.me/{BOT_USERNAME}"
 
 # Инициализация бота и Flask
@@ -680,6 +676,7 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
     
+
 
 
 
