@@ -29,7 +29,7 @@ if not ADMIN_IDS:
 
 # Динамическая ссылка на бота
 BOT_USERNAME = os.environ.get('BOT_USERNAME', 'Goononkhamun_bot')
-BOT_LINK = f"https://t.me/{Goononkhamun_bot}"
+BOT_LINK = f"https://t.me/{BOT_USERNAME}"
 
 # Инициализация бота и Flask
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -680,6 +680,7 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
     
+
 
 
 
