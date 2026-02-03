@@ -6,7 +6,7 @@ import telebot
 app = Flask(__name__)
 
 # Получаем токен из переменных окружения
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
+BOT_TOKEN = os.environ.get('8519907445:AAGQKcnBDHoCsc3exLB7BjQpk3281SeIdHc')
 if not BOT_TOKEN:
     print("⚠️ ВНИМАНИЕ: BOT_TOKEN не установлен!")
     print("Добавьте BOT_TOKEN в Environment Variables на Render")
@@ -77,6 +77,7 @@ if __name__ == '__main__':
     
     # Запускаем Flask
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
