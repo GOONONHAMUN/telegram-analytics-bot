@@ -1,3 +1,6 @@
+MY_BOT_USERNAME = "Goononkhamun_bot"  # ЗАМЕНИТЕ НА ВАШ USERNAME
+MY_BOT_LINK = f"https://t.me/{MY_BOT_USERNAME}"
+
 import os
 import telebot
 from flask import Flask, request, jsonify
@@ -1287,5 +1290,6 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
     
+
 
 
